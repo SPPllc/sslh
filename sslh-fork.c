@@ -23,6 +23,10 @@
 #include "common.h"
 #include "probe.h"
 
+#ifdef LIBBSD
+#include <bsd/unistd.h>
+#endif
+
 const char* server_type = "sslh-fork";
 
 #define MAX(a, b)  (((a) > (b)) ? (a) : (b))
@@ -54,7 +58,7 @@ int shovel(struct connection *cnx)
           if (FD_ISSET(cnx->q[i].fd, &fds)) {
               res = fd2fd(&cnx->q[1-i], &cnx->q[i]);
               if (!res) {
-                  if (verbose) 
+                  if (cfg.verbose) 
                       fprintf(stderr, "%s %s", i ? "client" : "server", "socket closed\n");
                   return res;
               }
@@ -72,6 +76,7 @@ void start_shoveler(int in_socket)
    int res = PROBE_AGAIN;
    int out_socket;
    struct connection cnx;
+   struct connection_desc desc;
 
    init_cnx(&cnx);
    cnx.q[0].fd = in_socket;
@@ -79,7 +84,7 @@ void start_shoveler(int in_socket)
    FD_ZERO(&fds);
    FD_SET(in_socket, &fds);
    memset(&tv, 0, sizeof(tv));
-   tv.tv_sec = probing_timeout;
+   tv.tv_sec = cfg.timeout;
 
    while (res == PROBE_AGAIN) {
        /* POSIX does not guarantee that tv will be updated, but the client can
@@ -94,8 +99,8 @@ void start_shoveler(int in_socket)
        } else {
            /* Timed out: it's necessarily SSH */
            cnx.proto = timeout_protocol();
-           if (verbose) 
-               log_message(LOG_INFO, "timed out, connect to %s\n", cnx.proto->description);
+           if (cfg.verbose) 
+               log_message(LOG_INFO, "timed out, connect to %s\n", cnx.proto->name);
            break;
        }
    }
@@ -111,7 +116,9 @@ void start_shoveler(int in_socket)
 
    cnx.q[1].fd = out_socket;
 
-   log_connection(&cnx);
+   get_connection_desc(&desc, &cnx);
+   log_connection(&desc, &cnx);
+   set_proctitle_shovel(&desc, &cnx);
 
    flush_deferred(&cnx.q[1]);
 
@@ -120,7 +127,7 @@ void start_shoveler(int in_socket)
    close(in_socket);
    close(out_socket);
    
-   if (verbose)
+   if (cfg.verbose)
       fprintf(stderr, "connection closed down\n");
 
    exit(0);
@@ -136,6 +143,24 @@ void stop_listeners(int sig)
     for (i = 0; i < listener_pid_number; i++) {
         kill(listener_pid[i], sig);
     }
+}
+
+void set_listen_procname(int listen_socket)
+{
+#ifdef LIBBSD
+    int res;
+    struct addrinfo addr;
+    struct sockaddr_storage ss;
+    char listen_addr[NI_MAXHOST+1+NI_MAXSERV+1];
+
+    addr.ai_addr = (struct sockaddr*)&ss;
+    addr.ai_addrlen = sizeof(ss);
+    res = getsockname(listen_socket, addr.ai_addr, &addr.ai_addrlen);
+    if (res != -1) {
+        sprintaddr(listen_addr, sizeof(listen_addr), &addr);
+        setproctitle("listener %s", listen_addr);
+    }
+#endif
 }
 
 void main_loop(int listen_sockets[], int num_addr_listen)
@@ -158,10 +183,11 @@ void main_loop(int listen_sockets[], int num_addr_listen)
         case 0:
             /* Listening process just accepts a connection, forks, and goes
              * back to listening */
+            set_listen_procname(listen_sockets[i]);
             while (1)
             {
                 in_socket = accept(listen_sockets[i], 0, 0);
-                if (verbose) fprintf(stderr, "accepted fd %d\n", in_socket);
+                if (cfg.verbose) fprintf(stderr, "accepted fd %d\n", in_socket);
 
                 switch(fork()) {
                 case -1: log_message(LOG_ERR, "fork failed: err %d: %s\n", errno, strerror(errno));

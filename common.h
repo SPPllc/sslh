@@ -42,10 +42,10 @@
        exit(1);         \
     }
 
-#define CHECK_RES_RETURN(res, str) \
+#define CHECK_RES_RETURN(res, str, ret) \
     if (res == -1) {                                    \
         log_message(LOG_CRIT, "%s:%d:%s:%d:%s\n", __FILE__, __LINE__, str, errno, strerror(errno));  \
-        return res;                                     \
+        return ret;                                     \
     } 
 
 #define CHECK_ALLOC(a, str) \
@@ -65,6 +65,14 @@
 
 #ifndef IP_FREEBIND
 #define IP_FREEBIND 0
+#endif
+
+#ifndef TCP_FASTOPEN
+#define TCP_FASTOPEN 0
+#endif
+
+#ifndef TCP_FASTOPEN_CONNECT
+#define TCP_FASTOPEN_CONNECT 30 /* Attempt FastOpen with connect.  */
 #endif
 
 enum connection_state {
@@ -87,7 +95,7 @@ struct queue {
 struct connection {
     enum connection_state state;
     time_t probe_timeout;
-    struct proto *proto;
+    struct sslhcfg_protocols_item* proto;
 
     /* q[0]: queue for external connection (client);
      * q[1]: queue for internal connection (httpd or sshd);
@@ -99,6 +107,13 @@ struct connection {
 #define FD_NODATA       -1
 #define FD_STALLED      -2
 
+/* String description of a connection */
+#define MAX_NAMELENGTH (NI_MAXHOST + NI_MAXSERV + 1)
+struct connection_desc {
+    char peer[MAX_NAMELENGTH], service[MAX_NAMELENGTH],
+        local[MAX_NAMELENGTH], target[MAX_NAMELENGTH];
+};
+
 
 /* common.c */
 void init_cnx(struct connection *cnx);
@@ -106,27 +121,26 @@ int connect_addr(struct connection *cnx, int fd_from);
 int fd2fd(struct queue *target, struct queue *from);
 char* sprintaddr(char* buf, size_t size, struct addrinfo *a);
 void resolve_name(struct addrinfo **out, char* fullname);
-void log_connection(struct connection *cnx);
+int get_connection_desc(struct connection_desc* desc, const struct connection *cnx);
+void log_connection(struct connection_desc* desc, const struct connection *cnx);
+void set_proctitle_shovel(struct connection_desc* desc, const struct connection *cnx);
 int check_access_rights(int in_socket, const char* service);
 void setup_signals(void);
 void setup_syslog(const char* bin_name);
 void drop_privileges(const char* user_name, const char* chroot_path);
 void write_pid_file(const char* pidfile);
-void log_message(int type, char* msg, ...);
+void log_message(int type, const char* msg, ...);
 void dump_connection(struct connection *cnx);
-int resolve_split_name(struct addrinfo **out, const char* hostname, const char* port);
+int resolve_split_name(struct addrinfo **out, char* hostname, char* port);
 
 int start_listen_sockets(int *sockfd[], struct addrinfo *addr_list);
 
 int defer_write(struct queue *q, void* data, int data_size);
 int flush_deferred(struct queue *q);
 
-extern int probing_timeout, verbose, inetd, foreground, 
-       background, transparent, numeric;
-extern struct sockaddr_storage addr_ssl, addr_ssh, addr_openvpn;
+extern struct sslhcfg_item cfg;
 extern struct addrinfo *addr_listen;
 extern const char* USAGE_STRING;
-extern const char* user_name, *pid_file, *chroot_path, *facility;
 extern const char* server_type;
 
 /* sslh-fork.c */

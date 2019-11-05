@@ -16,6 +16,7 @@
 
 #include "common.h"
 #include "probe.h"
+#include "sslh-conf.h"
 
 /* Added to make the code compilable under CYGWIN
  * */
@@ -29,19 +30,14 @@
 #include <systemd/sd-daemon.h>
 #endif
 
+#ifdef LIBBSD
+#include <bsd/unistd.h>
+#endif
+
 /*
- * Settings that depend on the command line.  They're set in main(), but also
- * used in other places in common.c, and it'd be heavy-handed to pass it all as
- * parameters
+ * Settings that depend on the command line or the config file
  */
-int verbose = 0;
-int probing_timeout = 2;
-int inetd = 0;
-int foreground = 0;
-int background = 0;
-int transparent = 0;
-int numeric = 0;
-const char *user_name, *pid_file, *chroot_path, *facility = "auth";
+struct sslhcfg_item cfg;
 
 struct addrinfo *addr_listen = NULL; /* what addresses do we listen to? */
 
@@ -94,6 +90,24 @@ int get_fd_sockets(int *sockfd[])
     return sd;
 }
 
+/* Set TCP_FASTOPEN on listening socket if all client protocols support it */
+int make_listen_tfo(int s)
+{
+    int i, qlen = 5;
+
+    /* Don't do it if not supported */
+    if (!TCP_FASTOPEN)
+        return;
+
+    /* Don't do it if any protocol does not specify it */
+    for (i = 0; i < cfg.protocols_len; i++) {
+        if (! cfg.protocols[i].tfo_ok)
+            return;
+    }
+
+    return setsockopt(s, SOL_SOCKET, TCP_FASTOPEN, (char*)&qlen, sizeof(qlen));
+}
+
 /* Starts listening sockets on specified addresses.
  * IN: addr[], num_addr
  * OUT: *sockfd[]  pointer to newly-allocated array of file descriptors
@@ -122,7 +136,7 @@ int start_listen_sockets(int *sockfd[], struct addrinfo *addr_list)
        exit(1);
    }
 
-   if (verbose)
+   if (cfg.verbose)
        fprintf(stderr, "listening to %d addresses\n", num_addr);
 
    *sockfd = malloc(num_addr * sizeof(*sockfd[0]));
@@ -141,6 +155,9 @@ int start_listen_sockets(int *sockfd[], struct addrinfo *addr_list)
        one = 1;
        res = setsockopt((*sockfd)[i], SOL_SOCKET, SO_REUSEADDR, (char*)&one, sizeof(one));
        check_res_dump(CR_DIE, res, addr, "setsockopt(SO_REUSEADDR)");
+
+       res = make_listen_tfo((*sockfd)[i]);
+       check_res_dump(CR_WARN, res, addr, "setsockopt(TCP_FASTOPEN)");
 
        if (addr->ai_flags & SO_KEEPALIVE) {
            res = setsockopt((*sockfd)[i], SOL_SOCKET, SO_KEEPALIVE, (char*)&one, sizeof(one));
@@ -226,7 +243,7 @@ int bind_peer(int fd, int fd_from)
     /* getpeername can fail with ENOTCONN if connection was dropped before we
      * got here */
     res = getpeername(fd_from, from.ai_addr, &from.ai_addrlen);
-    CHECK_RES_RETURN(res, "getpeername");
+    CHECK_RES_RETURN(res, "getpeername", res);
 
     /* if the destination is the same machine, there's no need to do bind */
     if (is_same_machine(&from))
@@ -238,16 +255,16 @@ int bind_peer(int fd, int fd_from)
 #else
     if (from.ai_addr->sa_family==AF_INET) { /* IPv4 */
         res = setsockopt(fd, IPPROTO_IP, IP_BINDANY, &trans, sizeof(trans));
-        CHECK_RES_RETURN(res, "setsockopt IP_BINDANY");
+        CHECK_RES_RETURN(res, "setsockopt IP_BINDANY", res);
 #ifdef IPV6_BINDANY
     } else { /* IPv6 */
         res = setsockopt(fd, IPPROTO_IPV6, IPV6_BINDANY, &trans, sizeof(trans));
-        CHECK_RES_RETURN(res, "setsockopt IPV6_BINDANY");
+        CHECK_RES_RETURN(res, "setsockopt IPV6_BINDANY", res);
 #endif /* IPV6_BINDANY */
     }
 #endif /* IP_TRANSPARENT / IP_BINDANY */
     res = bind(fd, from.ai_addr, from.ai_addrlen);
-    CHECK_RES_RETURN(res, "bind");
+    CHECK_RES_RETURN(res, "bind", res);
 
     return 0;
 }
@@ -268,13 +285,13 @@ int connect_addr(struct connection *cnx, int fd_from)
     from.ai_addrlen = sizeof(ss);
 
     res = getpeername(fd_from, from.ai_addr, &from.ai_addrlen);
-    CHECK_RES_RETURN(res, "getpeername");
+    CHECK_RES_RETURN(res, "getpeername", res);
 
     for (a = cnx->proto->saddr; a; a = a->ai_next) {
         /* When transparent, make sure both connections use the same address family */
-        if (transparent && a->ai_family != from.ai_addr->sa_family)
+        if (cfg.transparent && a->ai_family != from.ai_addr->sa_family)
             continue;
-        if (verbose)
+        if (cfg.verbose)
             fprintf(stderr, "connecting to %s family %d len %d\n",
                     sprintaddr(buf, sizeof(buf), a),
                     a->ai_addr->sa_family, a->ai_addrlen);
@@ -283,22 +300,32 @@ int connect_addr(struct connection *cnx, int fd_from)
         fd = socket(a->ai_family, SOCK_STREAM, 0);
         if (fd == -1) {
             log_message(LOG_ERR, "forward to %s failed:socket: %s\n",
-                        cnx->proto->description, strerror(errno));
+                        cnx->proto->name, strerror(errno));
         } else {
-            if (transparent) {
+            one = 1;
+            setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &one, sizeof(one));
+            /* no need to check return value; if it's not supported, that's okay */
+
+            if (cfg.transparent) {
                 res = bind_peer(fd, fd_from);
-                CHECK_RES_RETURN(res, "bind_peer");
+                CHECK_RES_RETURN(res, "bind_peer", res);
             }
             res = connect(fd, a->ai_addr, a->ai_addrlen);
             if (res == -1) {
-                log_message(LOG_ERR, "forward to %s failed:connect: %s\n",
-                            cnx->proto->description, strerror(errno));
-                close(fd);
+                switch (errno) {
+                case EINPROGRESS: 
+                    /* Can't be done yet, or TFO already done */
+                    break;
+
+                default:
+                    log_message(LOG_ERR, "forward to %s failed:connect: %s\n",
+                                cnx->proto->name, strerror(errno));
+                    close(fd);
+                }
             } else {
                 if (cnx->proto->keepalive) {
-                    one = 1;
                     res = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (char*)&one, sizeof(one));
-                    CHECK_RES_RETURN(res, "setsockopt(SO_KEEPALIVE)");
+                    CHECK_RES_RETURN(res, "setsockopt(SO_KEEPALIVE)", res);
                 }
                 return fd;
             }
@@ -312,7 +339,7 @@ int defer_write(struct queue *q, void* data, int data_size)
 {
     char *p;
     ptrdiff_t data_offset = q->deferred_data - q->begin_deferred_data;
-    if (verbose)
+    if (cfg.verbose)
         fprintf(stderr, "**** writing deferred on fd %d\n", q->fd);
 
     p = realloc(q->begin_deferred_data, data_offset + q->deferred_data_size + data_size);
@@ -335,7 +362,7 @@ int flush_deferred(struct queue *q)
 {
     int n;
 
-    if (verbose)
+    if (cfg.verbose)
         fprintf(stderr, "flushing deferred data to fd %d\n", q->fd);
 
     n = write(q->fd, q->deferred_data, q->deferred_data_size);
@@ -363,7 +390,7 @@ void init_cnx(struct connection *cnx)
     memset(cnx, 0, sizeof(*cnx));
     cnx->q[0].fd = -1;
     cnx->q[1].fd = -1;
-    cnx->proto = get_first_protocol();
+    cnx->proto = NULL;
 }
 
 void dump_connection(struct connection *cnx)
@@ -395,7 +422,7 @@ int fd2fd(struct queue *target_q, struct queue *from_q)
    if (size_r == -1) {
        switch (errno) {
        case EAGAIN:
-           if (verbose)
+           if (cfg.verbose)
                fprintf(stderr, "reading 0 from %d\n", from);
            return FD_NODATA;
 
@@ -405,7 +432,7 @@ int fd2fd(struct queue *target_q, struct queue *from_q)
        }
    }
 
-   CHECK_RES_RETURN(size_r, "read");
+   CHECK_RES_RETURN(size_r, "read",FD_CNXCLOSED);
 
    if (size_r == 0)
       return FD_CNXCLOSED;
@@ -430,7 +457,7 @@ int fd2fd(struct queue *target_q, struct queue *from_q)
        return FD_STALLED;
    }
 
-   CHECK_RES_RETURN(size_w, "write");
+   CHECK_RES_RETURN(size_w, "write", FD_CNXCLOSED);
 
    return size_w;
 }
@@ -444,7 +471,7 @@ char* sprintaddr(char* buf, size_t size, struct addrinfo *a)
    res = getnameinfo(a->ai_addr, a->ai_addrlen,
                host, sizeof(host),
                serv, sizeof(serv),
-               numeric ? NI_NUMERICHOST | NI_NUMERICSERV : 0 );
+               cfg.numeric ? NI_NUMERICHOST | NI_NUMERICSERV : 0 );
 
    if (res) {
        log_message(LOG_ERR, "sprintaddr:getnameinfo: %s\n", gai_strerror(res));
@@ -469,25 +496,15 @@ char* sprintaddr(char* buf, size_t size, struct addrinfo *a)
 /* Turns a hostname and port (or service) into a list of struct addrinfo
  * returns 0 on success, -1 otherwise and logs error
  */
-int resolve_split_name(struct addrinfo **out, const char* ct_host, const char* serv)
+int resolve_split_name(struct addrinfo **out, char* host, char* serv)
 {
    struct addrinfo hint;
    char *end;
    int res;
-   char* host, *host_base;
 
    memset(&hint, 0, sizeof(hint));
    hint.ai_family = PF_UNSPEC;
    hint.ai_socktype = SOCK_STREAM;
-
-   /* Copy parameter so not to clobber data in libconfig */
-   res = asprintf(&host_base, "%s", ct_host);
-   if (res == -1) {
-       log_message(LOG_ERR, "asprintf: cannot allocate memory");
-       return -1;
-   }
-
-   host = host_base;
 
    /* If it is a RFC-Compliant IPv6 address ("[1234::12]:443"), remove brackets
     * around IP address */
@@ -504,7 +521,6 @@ int resolve_split_name(struct addrinfo **out, const char* ct_host, const char* s
    res = getaddrinfo(host, serv, &hint, out);
    if (res)
       log_message(LOG_ERR, "%s `%s:%s'\n", gai_strerror(res), host, serv);
-   free(host_base);
    return res;
 }
 
@@ -538,60 +554,93 @@ void resolve_name(struct addrinfo **out, char* fullname)
 }
 
 /* Log to syslog or stderr if foreground */
-void log_message(int type, char* msg, ...)
+void log_message(int type, const char* msg, ...)
 {
     va_list ap;
 
     va_start(ap, msg);
-    if (foreground)
+    if (cfg.foreground)
         vfprintf(stderr, msg, ap);
     else
         vsyslog(type, msg, ap);
     va_end(ap);
 }
 
-/* syslogs who connected to where */
-void log_connection(struct connection *cnx)
+
+/* Fills a connection description; returns 0 on failure */
+int get_connection_desc(struct connection_desc* desc, const struct connection *cnx)
 {
+    int res;
     struct addrinfo addr;
     struct sockaddr_storage ss;
-#define MAX_NAMELENGTH (NI_MAXHOST + NI_MAXSERV + 1)
-    char peer[MAX_NAMELENGTH], service[MAX_NAMELENGTH],
-        local[MAX_NAMELENGTH], target[MAX_NAMELENGTH];
-    int res;
-
-    if (cnx->proto->log_level < 1)
-        return;
 
     addr.ai_addr = (struct sockaddr*)&ss;
     addr.ai_addrlen = sizeof(ss);
 
     res = getpeername(cnx->q[0].fd, addr.ai_addr, &addr.ai_addrlen);
-    if (res == -1) return; /* Can happen if connection drops before we get here.
+    if (res == -1) return 0; /* Can happen if connection drops before we get here.
                                In that case, don't log anything (there is no connection) */
-    sprintaddr(peer, sizeof(peer), &addr);
+    sprintaddr(desc->peer, sizeof(desc->peer), &addr);
 
     addr.ai_addrlen = sizeof(ss);
     res = getsockname(cnx->q[0].fd, addr.ai_addr, &addr.ai_addrlen);
-    if (res == -1) return;
-    sprintaddr(service, sizeof(service), &addr);
+    if (res == -1) return 0;
+    sprintaddr(desc->service, sizeof(desc->service), &addr);
 
     addr.ai_addrlen = sizeof(ss);
     res = getpeername(cnx->q[1].fd, addr.ai_addr, &addr.ai_addrlen);
-    if (res == -1) return;
-    sprintaddr(target, sizeof(target), &addr);
+    if (res == -1) return 0;
+    sprintaddr(desc->target, sizeof(desc->target), &addr);
 
     addr.ai_addrlen = sizeof(ss);
     res = getsockname(cnx->q[1].fd, addr.ai_addr, &addr.ai_addrlen);
-    if (res == -1) return;
-    sprintaddr(local, sizeof(local), &addr);
+    if (res == -1) return 0;
+    sprintaddr(desc->local, sizeof(desc->local), &addr);
+
+    return 1;
+}
+
+/* syslogs who connected to where 
+ * desc: string description of the connection. if NULL, log_connection will
+ * manage on its own
+ * cnx: connection descriptor
+ * */
+void log_connection(struct connection_desc* desc, const struct connection *cnx)
+{
+    struct connection_desc d;
+
+    if (cnx->proto->log_level < 1)
+        return;
+
+    if (!desc) {
+        desc = &d;
+        get_connection_desc(desc, cnx);
+    }
 
     log_message(LOG_INFO, "%s:connection from %s to %s forwarded from %s to %s\n",
-                cnx->proto->description,
-                peer,
-                service,
-                local,
-                target);
+                cnx->proto->name,
+                desc->peer,
+                desc->service,
+                desc->local,
+                desc->target);
+}
+
+void set_proctitle_shovel(struct connection_desc* desc, const struct connection *cnx)
+{
+#ifdef LIBBSD
+    struct connection_desc d;
+
+    if (!desc) {
+        desc = &d;
+        get_connection_desc(desc, cnx);
+    }
+    setproctitle("shovel %s %s->%s => %s->%s",
+        cnx->proto->name,
+        desc->peer,
+        desc->service,
+        desc->local,
+        desc->target);
+#endif
 }
 
 
@@ -613,27 +662,27 @@ int check_access_rights(int in_socket, const char* service)
     int res;
 
     res = getpeername(in_socket, &peer.saddr, &size);
-    CHECK_RES_RETURN(res, "getpeername");
+    CHECK_RES_RETURN(res, "getpeername", res);
 
     /* extract peer address */
     res = getnameinfo(&peer.saddr, size, addr_str, sizeof(addr_str), NULL, 0, NI_NUMERICHOST);
     if (res) {
-        if (verbose)
+        if (cfg.verbose)
             fprintf(stderr, "getnameinfo(NI_NUMERICHOST):%s\n", gai_strerror(res));
         strcpy(addr_str, STRING_UNKNOWN);
     }
     /* extract peer name */
     strcpy(host, STRING_UNKNOWN);
-    if (!numeric) {
+    if (!cfg.numeric) {
         res = getnameinfo(&peer.saddr, size, host, sizeof(host), NULL, 0, NI_NAMEREQD);
         if (res) {
-            if (verbose)
+            if (cfg.verbose)
                 fprintf(stderr, "getnameinfo(NI_NAMEREQD):%s\n", gai_strerror(res));
         }
     }
 
     if (!hosts_ctl(service, host, addr_str, STRING_UNKNOWN)) {
-        if (verbose)
+        if (cfg.verbose)
             fprintf(stderr, "access denied\n");
         log_message(LOG_INFO, "connection from %s(%s): access denied", host, addr_str);
         close(in_socket);
@@ -681,10 +730,10 @@ void setup_syslog(const char* bin_name) {
     CHECK_RES_DIE(res, "asprintf");
 
     for (fn = 0; facilitynames[fn].c_val != -1; fn++)
-        if (strcmp(facilitynames[fn].c_name, facility) == 0)
+        if (strcmp(facilitynames[fn].c_name, cfg.syslog_facility) == 0)
             break;
     if (facilitynames[fn].c_val == -1) {
-        fprintf(stderr, "Unknown facility %s\n", facility);
+        fprintf(stderr, "Unknown facility %s\n", cfg.syslog_facility);
         exit(1);
     }
 
@@ -715,7 +764,7 @@ void set_capabilities(void) {
     cap_value_t cap_list[10];
     int ncap = 0;
 
-    if (transparent)
+    if (cfg.transparent)
         cap_list[ncap++] = CAP_NET_ADMIN;
 
     caps = cap_init();
@@ -757,12 +806,12 @@ void drop_privileges(const char* user_name, const char* chroot_path)
             fprintf(stderr, "%s: not found\n", user_name);
             exit(2);
         }
-        if (verbose)
+        if (cfg.verbose)
             fprintf(stderr, "turning into %s\n", user_name);
     }
 
     if (chroot_path) {
-        if (verbose)
+        if (cfg.verbose)
             fprintf(stderr, "chrooting into %s\n", chroot_path);
 
         res = chroot(chroot_path);

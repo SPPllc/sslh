@@ -49,6 +49,17 @@ sub verbose_exec
     }
 }
 
+# We want to keep track of tests to print a report at the
+# end, so we centralise all calls to Test::More::is here
+my $cnt = 1;   # test counter
+my @results;
+sub my_is {
+    my ($a, $b, $desc) = @_;
+
+    my $res =  is($a, $b, $desc);
+    push @results, [$cnt++, $desc, $res];
+}
+
 
 
 # For SNI/ALPN, build a protocol name as such:
@@ -90,11 +101,12 @@ sub test_probe {
     $data =~ /^(.*?): /;
     my $prefix = $1;
     $data =~ s/$prefix: //g;
-    print "Received: protocol $prefix data [$data]\n";
+    print "Received $n bytes: protocol $prefix data [$data]\n";
     close $cnx;
 
-    is($prefix, $opts{expected}, "probe $opts{expected} connected correctly");
-    is($data, $opts{data}, "data shoveled correctly");
+    $opts{expected} =~ s/^ssl/tls/; # to remove in 1.21
+    my_is($prefix, $opts{expected}, "$opts{binary}:$opts{expected}: probe connected correctly");
+    my_is($data, $opts{data}, "$opts{binary}:$opts{expected}: data shoveled correctly");
 }
 
 # Test all probes, with or without fragmentation
@@ -103,7 +115,7 @@ sub test_probe {
 #     available per-protocol as some probes don't support
 #     fragmentation)
 sub test_probes {
-    my (%opts) = @_;
+    my (%in_opts) = @_;
 
     my @probes = @{$conf->fetch_array("protocols")};
     foreach my $p (@probes) {
@@ -113,7 +125,9 @@ sub test_probes {
             'http' => { 
                 data => "GET index.html HTTP/1.1",
                 no_frag => 1 },
-            'ssl' => { data => "\x16\x03\x031234" },
+            'ssl' => {
+                data => "\x16\x03\x01\x00\xab\x01\x00\x00\xa7\x03\x03\x89\x22\x33\x95\x43\x7a\xc3\x89\x45\x51\x12\x3c\x28\x24\x1b\x6a\x78\xbf\xbe\x95\xd8\x90\x58\xd7\x65\xf7\xbb\x2d\xb2\x8d\xa0\x75\x00\x00\x38\xc0\x2c\xc0\x30\x00\x9f\xcc\xa9\xcc\xa8\xcc\xaa\xc0\x2b\xc0\x2f\x00\x9e\xc0\x24\xc0\x28\x00\x6b\xc0\x23\xc0\x27\x00\x67\xc0\x0a\xc0\x14\x00\x39\xc0\x09\xc0\x13\x00\x33\x00\x9d\x00\x9c\x00\x3d\x00\x3c\x00\x35\x00\x2f\x00\xff\x01\x00\x00\x46\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x19\x00\x18\x00\x23\x00\x00\x00\x0d\x00\x20\x00\x1e\x06\x01\x06\x02\x06\x03\x05\x01\x05\x02\x05\x03\x04\x01\x04\x02\x04\x03\x03\x01\x03\x02\x03\x03\x02\x01\x02\x02\x02\x03\x00\x16\x00\x00\x00\x17\x00\x00hello ssl alone"
+            },
             'tls' => { 
                 # Packet with SNI and ALPN (`openssl s_client -connect localhost:443 -alpn alpn1 -servername sni1`)
                 data_sni_alpn => "\x16\x03\x01\x00\xc4\x01\x00\x00\xc0\x03\x03\x03\x19\x01\x00\x40\x14\x13\xcc\x1b\x94\xad\x20\x5d\x13\x1a\x8d\xd2\x65\x23\x70\xde\xd1\x3c\x5d\x05\x19\xcb\x27\x0d\x7c\x2c\x89\x00\x00\x38\xc0\x2c\xc0\x30\x00\x9f\xcc\xa9\xcc\xa8\xcc\xaa\xc0\x2b\xc0\x2f\x00\x9e\xc0\x24\xc0\x28\x00\x6b\xc0\x23\xc0\x27\x00\x67\xc0\x0a\xc0\x14\x00\x39\xc0\x09\xc0\x13\x00\x33\x00\x9d\x00\x9c\x00\x3d\x00\x3c\x00\x35\x00\x2f\x00\xff\x01\x00\x00\x5f\x00\x00\x00\x09\x00\x07\x00\x00\x04\$sni\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x19\x00\x18\x00\x23\x00\x00\x00\x0d\x00\x20\x00\x1e\x06\x01\x06\x02\x06\x03\x05\x01\x05\x02\x05\x03\x04\x01\x04\x02\x04\x03\x03\x01\x03\x02\x03\x03\x02\x01\x02\x02\x02\x03\x00\x10\x00\x08\x00\x06\x05\$alpn\x00\x16\x00\x00\x00\x17\x00\x00hello sni/alpn",
@@ -121,6 +135,8 @@ sub test_probes {
                 data_sni => "\x16\x03\x01\x00\xb8\x01\x00\x00\xb4\x03\x03\x97\xe4\xe9\xad\x86\xe1\x21\xfd\xc4\x5b\x27\x0e\xad\x4b\x55\xc2\x50\xe4\x1c\x86\x2f\x37\x25\xde\xe8\x9c\x59\xfc\x1b\xa9\x37\x32\x00\x00\x38\xc0\x2c\xc0\x30\x00\x9f\xcc\xa9\xcc\xa8\xcc\xaa\xc0\x2b\xc0\x2f\x00\x9e\xc0\x24\xc0\x28\x00\x6b\xc0\x23\xc0\x27\x00\x67\xc0\x0a\xc0\x14\x00\x39\xc0\x09\xc0\x13\x00\x33\x00\x9d\x00\x9c\x00\x3d\x00\x3c\x00\x35\x00\x2f\x00\xff\x01\x00\x00\x53\x00\x00\x00\x09\x00\x07\x00\x00\x04\$sni\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x19\x00\x18\x00\x23\x00\x00\x00\x0d\x00\x20\x00\x1e\x06\x01\x06\x02\x06\x03\x05\x01\x05\x02\x05\x03\x04\x01\x04\x02\x04\x03\x03\x01\x03\x02\x03\x03\x02\x01\x02\x02\x02\x03\x00\x16\x00\x00\x00\x17\x00\x00hello sni",
                 # packet with ALPN alone
                 data_alpn => "\x16\x03\x01\x00\xb7\x01\x00\x00\xb3\x03\x03\xe2\x90\xa2\x29\x03\x31\xad\x98\x44\x51\x54\x90\x5b\xd9\x51\x0e\x66\xb5\x3f\xe8\x8b\x09\xc9\xe4\x2b\x97\x24\xef\xad\x56\x06\xc9\x00\x00\x38\xc0\x2c\xc0\x30\x00\x9f\xcc\xa9\xcc\xa8\xcc\xaa\xc0\x2b\xc0\x2f\x00\x9e\xc0\x24\xc0\x28\x00\x6b\xc0\x23\xc0\x27\x00\x67\xc0\x0a\xc0\x14\x00\x39\xc0\x09\xc0\x13\x00\x33\x00\x9d\x00\x9c\x00\x3d\x00\x3c\x00\x35\x00\x2f\x00\xff\x01\x00\x00\x52\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x19\x00\x18\x00\x23\x00\x00\x00\x0d\x00\x20\x00\x1e\x06\x01\x06\x02\x06\x03\x05\x01\x05\x02\x05\x03\x04\x01\x04\x02\x04\x03\x03\x01\x03\x02\x03\x03\x02\x01\x02\x02\x02\x03\x00\x10\x00\x08\x00\x06\x05\$alpn\x00\x16\x00\x00\x00\x17\x00\x00hello alpn",
+                # packet with no SNI, no ALPN
+                data => "\x16\x03\x01\x00\xab\x01\x00\x00\xa7\x03\x03\x89\x22\x33\x95\x43\x7a\xc3\x89\x45\x51\x12\x3c\x28\x24\x1b\x6a\x78\xbf\xbe\x95\xd8\x90\x58\xd7\x65\xf7\xbb\x2d\xb2\x8d\xa0\x75\x00\x00\x38\xc0\x2c\xc0\x30\x00\x9f\xcc\xa9\xcc\xa8\xcc\xaa\xc0\x2b\xc0\x2f\x00\x9e\xc0\x24\xc0\x28\x00\x6b\xc0\x23\xc0\x27\x00\x67\xc0\x0a\xc0\x14\x00\x39\xc0\x09\xc0\x13\x00\x33\x00\x9d\x00\x9c\x00\x3d\x00\x3c\x00\x35\x00\x2f\x00\xff\x01\x00\x00\x46\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x19\x00\x18\x00\x23\x00\x00\x00\x0d\x00\x20\x00\x1e\x06\x01\x06\x02\x06\x03\x05\x01\x05\x02\x05\x03\x04\x01\x04\x02\x04\x03\x03\x01\x03\x02\x03\x03\x02\x01\x02\x02\x02\x03\x00\x16\x00\x00\x00\x17\x00\x00hello tls alone"
             },
             'openvpn' => { data => "\x00\x00" },
             'tinc' => { data => "0 hello" },
@@ -131,6 +147,7 @@ sub test_probes {
 
         my $pattern = $protocols{$p->{name}}->{data};
 
+        my %opts = %in_opts;
         $opts{no_frag} = 1 if $protocols{$p->{name}}->{no_frag};
 
         if ($p->{sni_hostnames} or $p->{alpn_protocols}) {
@@ -155,6 +172,14 @@ sub test_probes {
                     );
                 }
             }
+        } elsif ($p->{name} eq 'regex') {
+            foreach my $test (@{$p->{test_patterns}}) {
+                test_probe(
+                    data => $test->{pattern},
+                    expected => $test->{result},
+                    %opts
+                );
+            }
         } else {
             test_probe(
                 data => $pattern,
@@ -172,6 +197,8 @@ sub test_probes {
 foreach my $s (@{$conf->fetch_array("protocols")}) {
     my $prefix = $s->{name};
 
+    $prefix =~ s/^ssl/tls/; # To remove in 1.21
+
     if ($s->{sni_hostnames} or $s->{alpn_protocols}) {
         $prefix = make_sni_alpn_name($s);
     }
@@ -181,6 +208,7 @@ foreach my $s (@{$conf->fetch_array("protocols")}) {
 
 
 my @binaries = ('sslh-select', 'sslh-fork');
+
 for my $binary (@binaries) {
     warn "Testing $binary\n";
 
@@ -188,10 +216,9 @@ for my $binary (@binaries) {
     my $sslh_pid;
     if (!($sslh_pid = fork)) {
         my $user = (getpwuid $<)[0]; # Run under current username
-        #my $cmd = "./$binary -v -f -u $user --listen localhost:$sslh_port --ssh $ssh_address --ssl $ssl_address -P $pidfile";
-        my $cmd = "./$binary -v -f -u $user -Ftest.cfg";
+        my $cmd = "./$binary -v 4 -f -u $user -Ftest.cfg";
         verbose_exec $cmd;
-        #exec "valgrind --leak-check=full ./$binary -v -f -u $user --listen localhost:$sslh_port --ssh $ssh_address -ssl $ssl_address -P $pidfile";
+        #exec "valgrind --leak-check=full ./$binary -v 3 -f -u $user --listen localhost:$sslh_port --ssh $ssh_address -ssl $ssl_address -P $pidfile";
         exit 0;
     }
     warn "spawned $sslh_pid\n";
@@ -199,8 +226,7 @@ for my $binary (@binaries) {
 
 
     my $test_data = "hello world\n";
-#    my $ssl_test_data = (pack 'n', ((length $test_data) + 2)) .  $test_data;
-    my $ssl_test_data = "\x16\x03\x03$test_data\n";
+    my $ssl_test_data =  "\x16\x03\x01\x00\xab\x01\x00\x00\xa7\x03\x03\x89\x22\x33\x95\x43\x7a\xc3\x89\x45\x51\x12\x3c\x28\x24\x1b\x6a\x78\xbf\xbe\x95\xd8\x90\x58\xd7\x65\xf7\xbb\x2d\xb2\x8d\xa0\x75\x00\x00\x38\xc0\x2c\xc0\x30\x00\x9f\xcc\xa9\xcc\xa8\xcc\xaa\xc0\x2b\xc0\x2f\x00\x9e\xc0\x24\xc0\x28\x00\x6b\xc0\x23\xc0\x27\x00\x67\xc0\x0a\xc0\x14\x00\x39\xc0\x09\xc0\x13\x00\x33\x00\x9d\x00\x9c\x00\x3d\x00\x3c\x00\x35\x00\x2f\x00\xff\x01\x00\x00\x46\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x0a\x00\x08\x00\x1d\x00\x17\x00\x19\x00\x18\x00\x23\x00\x00\x00\x0d\x00\x20\x00\x1e\x06\x01\x06\x02\x06\x03\x05\x01\x05\x02\x05\x03\x04\x01\x04\x02\x04\x03\x03\x01\x03\x02\x03\x03\x02\x01\x02\x02\x02\x03\x00\x16\x00\x00\x00\x17\x00\x00hello tls alone";
 
 # Test: Shy SSH connection
     if ($SSH_SHY_CNX) {
@@ -208,10 +234,10 @@ for my $binary (@binaries) {
         my $cnx_h = new IO::Socket::INET(PeerHost => "localhost:$sslh_port");
         warn "$!\n" unless $cnx_h;
         if (defined $cnx_h) {
-            sleep 3;
+            sleep 13;
             print $cnx_h $test_data;
             my $data = <$cnx_h>;
-            is($data, "ssh: $test_data", "Shy SSH connection");
+            my_is($data, "ssh: $test_data", "$binary: Shy SSH connection");
         }
     }
 
@@ -228,11 +254,11 @@ for my $binary (@binaries) {
                 sleep 3;
                 print $cnx_h $test_data;
                 my $data_h = <$cnx_h>;
-                is($data_h, "ssh: $test_data", "SSH during SSL being established");
+                my_is($data_h, "ssh: $test_data", "$binary: SSH during SSL being established");
             }
             my $data;
             my $n = sysread $cnx_l, $data, 1024;
-            is($data, "ssl: $ssl_test_data", "SSL connection interrupted by SSH");
+            my_is($data, "tls: $ssl_test_data", "$binary: SSL connection interrupted by SSH");
         }
     }
 
@@ -249,21 +275,21 @@ for my $binary (@binaries) {
                 print $cnx_l $ssl_test_data;
                 my $data;
                 my $n = sysread $cnx_l, $data, 1024;
-                is($data, "ssl: $ssl_test_data", "SSL during SSH being established");
+                my_is($data, "tls: $ssl_test_data", "$binary: SSL during SSH being established");
             }
             print $cnx_h $test_data;
             my $data = <$cnx_h>;
-            is($data, "ssh: $test_data", "SSH connection interrupted by SSL");
+            my_is($data, "ssh: $test_data", "$binary: SSH connection interrupted by SSL");
         }
     }
 
 
     if ($PROBES_NOFRAG) {
-        test_probes(no_frag => 1);
+        test_probes(no_frag => 1, binary => $binary);
     }
 
     if ($PROBES_AGAIN) {
-        test_probes;
+        test_probes(binary => $binary);
     }
 
     my $pid = `cat $pidfile`;
@@ -277,7 +303,7 @@ if ($RB_CNX_NOSERVER) {
     print "***Test: Connecting to non-existant server\n";
     my $sslh_pid;
     if (!($sslh_pid = fork)) {
-        exec "./sslh-select -v -f -u $user --listen localhost:$sslh_port --ssh localhost:$no_listen --ssl localhost:$no_listen -P $pidfile";
+        exec "./sslh-select -v 3 -f -u $user --listen localhost:$sslh_port --ssh localhost:$no_listen --tls localhost:$no_listen -P $pidfile";
     }
     warn "spawned $sslh_pid\n";
 
@@ -300,7 +326,8 @@ if ($RB_CNX_NOSERVER) {
 my $ssh_conf = (grep { $_->{name} eq "ssh" } @{$conf->fetch_array("protocols")})[0];
 my $ssh_address = $ssh_conf->{host} . ":" .  $ssh_conf->{port};
 
-my $ssl_conf = (grep { $_->{name} eq "ssl" } @{$conf->fetch_array("protocols")})[0];
+# Use the last TLS echoserv (no SNI/ALPN)
+my $ssl_conf = (grep { $_->{name} eq "tls" } @{$conf->fetch_array("protocols")})[-1];
 my $ssl_address = $ssl_conf->{host} . ":" .  $ssl_conf->{port};
 
 
@@ -309,13 +336,13 @@ if ($RB_PARAM_NOHOST) {
     print "***Test: No hostname in address\n";
     my $sslh_pid;
     if (!($sslh_pid = fork)) {
-        exec "./sslh-select -v -f -u $user --listen $sslh_port --ssh $ssh_address --ssl $ssl_address -P $pidfile";
+        exec "./sslh-select -v 3 -f -u $user --listen $sslh_port --ssh $ssh_address --tls $ssl_address -P $pidfile";
     }
     warn "spawned $sslh_pid\n";
     waitpid $sslh_pid, 0;
     my $code = $? >> 8;
     warn "exited with $code\n";
-    is($code, 1, "Exit status on illegal option");
+    my_is($code, 1, "Exit status on illegal option");
 }
 
 # Robustness: User does not exist
@@ -323,13 +350,13 @@ if ($RB_WRONG_USERNAME) {
     print "***Test: Changing to non-existant username\n";
     my $sslh_pid;
     if (!($sslh_pid = fork)) {
-        exec "./sslh-select -v -f -u ${user}_doesnt_exist --listen localhost:$sslh_port --ssh $ssh_address --ssl $ssl_address -P $pidfile";
+        exec "./sslh-select -v 3 -f -u ${user}_doesnt_exist --listen localhost:$sslh_port --ssh $ssh_address --tls $ssl_address -P $pidfile";
     }
     warn "spawned $sslh_pid\n";
     waitpid $sslh_pid, 0;
     my $code = $? >> 8;
     warn "exited with $code\n";
-    is($code, 2, "Exit status on non-existant username");
+    my_is($code, 2, "Exit status on non-existant username");
 }
 
 # Robustness: Can't open PID file
@@ -337,14 +364,14 @@ if ($RB_OPEN_PID_FILE) {
     print "***Test: Can't open PID file\n";
     my $sslh_pid;
     if (!($sslh_pid = fork)) {
-        exec "./sslh-select -v -f -u $user --listen localhost:$sslh_port --ssh $ssh_address --ssl $ssl_address -P /dont_exist/$pidfile";
+        exec "./sslh-select -v 3 -f -u $user --listen localhost:$sslh_port --ssh $ssh_address --tls $ssl_address -P /dont_exist/$pidfile";
         # You don't have a /dont_exist/ directory, do you?!
     }
     warn "spawned $sslh_pid\n";
     waitpid $sslh_pid, 0;
     my $code = $? >> 8;
     warn "exited with $code\n";
-    is($code, 3, "Exit status if can't open PID file");
+    my_is($code, 3, "Exit status if can't open PID file");
 }
 
 # Robustness: Can't resolve address
@@ -353,13 +380,13 @@ if ($RB_RESOLVE_ADDRESS) {
     my $sslh_pid;
     if (!($sslh_pid = fork)) {
         my $user = (getpwuid $<)[0]; # Run under current username
-        exec "./sslh-select -v -f -u $user --listen blahblah.dontexist:9000 --ssh $ssh_address --ssl $ssl_address -P $pidfile";
+        exec "./sslh-select -v 3 -f -u $user --listen blahblah.dontexist:9000 --ssh $ssh_address --tls $ssl_address -P $pidfile";
     }
     warn "spawned $sslh_pid\n";
     waitpid $sslh_pid, 0;
     my $code = $? >> 8;
     warn "exited with $code\n";
-    is($code, 4, "Exit status if can't resolve address");
+    my_is($code, 4, "Exit status if can't resolve address");
 }
 
 `lcov --directory . --capture --output-file sslh_cov.info`;
@@ -367,3 +394,17 @@ if ($RB_RESOLVE_ADDRESS) {
 
 `killall echosrv`;
 
+
+format test_results_top =
+ID  | Description                                                       | Status
+----+-------------------------------------------------------------------+-------
+.
+
+format test_results = 
+@>> | @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< |   @>>
+$_->[0], $_->[1], $_->[2] ? "OK" : "NOK"
+.
+
+format_name STDOUT "test_results";
+format_top_name STDOUT "test_results_top";
+map { write; } @results;

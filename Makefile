@@ -7,6 +7,7 @@ USELIBPCRE=1	# Use libpcre? (needed for regex on musl)
 USELIBWRAP?=	# Use libwrap?
 USELIBCAP=	# Use libcap?
 USESYSTEMD=     # Make use of systemd socket activation
+USELIBBSD?=     # Use libbsd (needed to update process name in `ps`)
 COV_TEST= 	# Perform test coverage?
 PREFIX?=/usr
 BINDIR?=$(PREFIX)/sbin
@@ -25,7 +26,7 @@ CC ?= gcc
 CFLAGS ?=-Wall -g $(CFLAGS_COV)
 
 LIBS=
-OBJS=common.o sslh-main.o probe.o tls.o
+OBJS=sslh-conf.o common.o sslh-main.o probe.o tls.o argtable3.o
 
 CONDITIONAL_TARGETS=
 
@@ -59,6 +60,11 @@ ifneq ($(strip $(USESYSTEMD)),)
 	CONDITIONAL_TARGETS+=systemd-sslh-generator
 endif
 
+ifneq ($(strip $(USELIBBSD)),)
+        LIBS:=$(LIBS) -lbsd
+        CPPFLAGS+=-DLIBBSD
+endif
+
 
 all: sslh $(MAN) echosrv $(CONDITIONAL_TARGETS)
 
@@ -71,6 +77,9 @@ version.h:
 sslh: sslh-fork sslh-select
 
 $(OBJS): version.h
+
+sslh-conf.c: sslhconf.cfg
+	conf2struct sslhconf.cfg
 
 sslh-fork: version.h $(OBJS) sslh-fork.o Makefile common.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o sslh-fork sslh-fork.o $(OBJS) $(LIBS)
@@ -112,7 +121,7 @@ uninstall:
 	update-rc.d sslh remove
 
 distclean: clean
-	rm -f tags cscope.*
+	rm -f tags sslh-conf.c sslh-conf.h cscope.*
 
 clean:
 	rm -f sslh-fork sslh-select echosrv version.h $(MAN) systemd-sslh-generator *.o *.gcov *.gcno *.gcda *.png *.html *.css *.info

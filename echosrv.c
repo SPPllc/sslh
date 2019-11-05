@@ -53,6 +53,8 @@ const char* server_type = "echsrv"; /* keep setup_syslog happy */
 char* prefix = "";
 int port;
 
+int verbose, numeric;
+
 void parse_cmdline(int argc, char* argv[])
 {
     int c;
@@ -104,7 +106,7 @@ void start_echo(int fd)
     strcpy(buffer, prefix);
 
     while (1) {
-        ret = read(fd, buffer + prefix_len, sizeof(buffer));
+        ret = read(fd, buffer + prefix_len, sizeof(buffer) - prefix_len);
         if (ret == -1) {
             fprintf(stderr, "%s", strerror(errno));
             return;
